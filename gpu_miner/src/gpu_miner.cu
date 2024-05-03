@@ -6,38 +6,34 @@
 #include <inttypes.h>
 
 // TODO: Implement function to search for all nonces from 1 through MAX_NONCE (inclusive) using CUDA Threads
-__global__ void findNonce(uint32_t *nonce, BYTE *block_content, size_t current_length, BYTE *block_hash, BYTE *difficulty, char *found_hash) {
+__global__ void findNonce(uint32_t *nonce, BYTE *block_content, size_t current_length, BYTE *block_hash, BYTE *difficulty) {
     uint32_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t step = gridDim.x * blockDim.x;
 
     for (uint32_t nonce_to_try = thread_id; nonce_to_try <= MAX_NONCE; nonce_to_try += step) {
-        // declare nonce_string
         char nonce_as_string[SHA256_HASH_SIZE];
         intToString(nonce_to_try, nonce_as_string);
-
-        // alocate memory for block_content, locally and copy block_content to it
-        BYTE new_block_content[BLOCK_SIZE];
-        d_strcpy((char*) new_block_content, (const char*) block_content);
-        // add nonce to block_content
-        d_strcpy((char*) new_block_content + current_length, nonce_as_string);
-
-        // alocate memory for block_hash
+	
+	BYTE new_block_content[BLOCK_SIZE];
+        // Copy block_content to new_block_content
+        memcpy(new_block_content, block_content, current_length);
+        
+        // Add nonce to block_content
+        memcpy(new_block_content + current_length, nonce_as_string, d_strlen(nonce_as_string) + 1);
+   
         BYTE new_block_hash[SHA256_HASH_SIZE];
 
-        // execute sha256
-        apply_sha256(new_block_content, d_strlen((const char *)new_block_content), new_block_hash, 1);
+        apply_sha256(new_block_content, current_length + d_strlen(nonce_as_string), new_block_hash, 1);
         
         // compare block_hash with difficulty_5_zeros
         if (compare_hashes(new_block_hash, difficulty) <= 0) {
-    	    if (nonce_to_try < *nonce || *nonce == 0) {
+            if (nonce_to_try < *nonce || *nonce == 0) {
                 atomicExch(nonce, nonce_to_try);
-		        d_strcpy((char*) block_hash, (const char*) new_block_hash);
+                memcpy(block_hash, new_block_hash, SHA256_HASH_SIZE);
             }
-
             return;
         }
     }
-
 }
 
 int main(int argc, char **argv) {
@@ -73,17 +69,12 @@ int main(int argc, char **argv) {
     BYTE *d_block_content, *d_block_hash;
     uint32_t *d_nonce;
     BYTE *d_difficulty;
-    char *found_hash;
-
-    const char* default_string = "default";
     
     cudaMalloc((void**)&d_block_content, BLOCK_SIZE);
     cudaMalloc((void**)&d_block_hash, SHA256_HASH_SIZE);
     cudaMalloc((void**)&d_nonce, sizeof(uint32_t));
     cudaMalloc((void**)&d_difficulty, SHA256_HASH_SIZE);
-    cudaMalloc((void**)&found_hash, 10);
 
-    cudaMemcpy(found_hash, default_string, 8, cudaMemcpyHostToDevice);
     cudaMemcpy(d_block_content, block_content, BLOCK_SIZE, cudaMemcpyHostToDevice);
 
     cudaMemcpy(d_difficulty, difficulty_5_zeros, SHA256_HASH_SIZE, cudaMemcpyHostToDevice);
@@ -91,22 +82,12 @@ int main(int argc, char **argv) {
     cudaEvent_t start, stop;
     startTiming(&start, &stop);
 
-    findNonce<<<112, 512>>>(d_nonce, d_block_content, current_length, d_block_hash, d_difficulty, found_hash);
-
-    cudaError_t cudaError = cudaGetLastError();
-    if (cudaError != cudaSuccess) {
-        printf("Error in kernel launch: %s\n", cudaGetErrorString(cudaError));  
-    }
+    findNonce<<<112, 512>>>(d_nonce, d_block_content, current_length, d_block_hash, d_difficulty);
 
     cudaDeviceSynchronize();
 
     cudaMemcpy(&nonce, d_nonce, sizeof(uint32_t), cudaMemcpyDeviceToHost);
     cudaMemcpy(block_hash, d_block_hash, SHA256_HASH_SIZE, cudaMemcpyDeviceToHost);
-
-    char *found = (char *)calloc(10, sizeof(char));
-    cudaMemcpy(found, found_hash, 10, cudaMemcpyDeviceToHost);
-
-    printf("%s\n", found);
 
     float seconds = stopTiming(&start, &stop);
     printResult(block_hash, nonce, seconds);
